@@ -1,0 +1,43 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Backend
+backend/__pycache__/
+backend/venv/
+backend/*.pyc
+backend/.pytest_cache/
+backend/chroma_db/
+backend/.DS_Store
+
+# Frontend
+frontend/frontend/node_modules/
+frontend/frontend/dist/
+frontend/frontend/.vite/
+frontend/frontend/vite.config.js.timestamp*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
