@@ -22,8 +22,8 @@ git push origin main
 4. Configure:
    - **Name**: `qabot-backend`
    - **Environment**: `Python 3.11`
-   - **Build Command**: `pip install -r backend/requirements.txt`
-   - **Start Command**: `cd backend && gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app`
+   - **Build Command**: `pip install -r qabot/backend/requirements.txt`
+   - **Start Command**: `cd qabot/backend && gunicorn -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT main:app`
    - **Plan**: Free (or Pro for persistence)
 
 ### Step 3: Add Environment Variables
@@ -39,8 +39,8 @@ In Render dashboard for backend service:
 2. Connect the same GitHub repository
 3. Configure:
    - **Name**: `qabot-frontend`
-   - **Build Command**: `cd frontend/frontend && npm install && npm run build`
-   - **Publish Directory**: `frontend/frontend/dist`
+   - **Build Command**: `cd qabot/frontend/frontend && npm install && npm run build`
+   - **Publish Directory**: `qabot/frontend/frontend/dist`
 
 ### Step 5: Add Frontend Environment Variables
 
@@ -49,7 +49,7 @@ In Render dashboard for frontend service:
 
 ### Step 6: Update CORS in Backend
 
-Update `backend/main.py` to allow your Render frontend:
+Update [qabot/backend/main.py](qabot/backend/main.py) to allow your Render frontend:
 
 ```python
 app.add_middleware(
