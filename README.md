@@ -11,6 +11,19 @@ A full-stack document Q&A application that lets users upload PDF files, extract 
 - Generate a document summary
 - Modern React frontend with a FastAPI backend
 
+## Screenshots
+
+Here are some screenshots of the application in action:
+
+### 1. Document Upload & Processing
+![Document Upload](./qabot/doc1.png)
+
+### 2. Asking Questions
+![Asking Questions](./qabot/doc2.png)
+
+### 3. Document Summary
+![Document Summary](./qabot/doc3.png)
+
 ## Tech Stack
 
 - Backend: FastAPI, Uvicorn, Python

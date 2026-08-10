@@ -14,9 +14,39 @@ from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
-from langchain_core.prompts import PromptTemplate
-
+# pyrefly: ignore [missing-import]
+# from langchain_ core.prompts import PromptTemplate
+# pyrefly: ignore [missing-import]
+from langchain_anthropic import ChatAnthropic
 load_dotenv()
+
+def get_llm():
+    """
+    Helper function to initialize the LLM.
+    To switch between Claude and Groq:
+    - Simply comment/uncomment the respective blocks below.
+    - Make sure the appropriate API key is configured in your .env file.
+    """
+    # === OPTION 1: Claude (Anthropic) ===
+    # To use Claude, uncomment the lines below, and comment out the Groq block.
+    
+    api_key =  os.getenv("CLAUDE_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Claude API key (ANTHROPIC_API_KEY or CLAUDE_API_KEY) not configured in .env")
+    return ChatAnthropic(
+        model="claude-haiku-4-5-20251001",
+        api_key=api_key,
+        temperature=0.3
+    )
+
+    # === OPTION 2: Groq ===
+    # if not os.getenv('GROQ_API_KEY'):
+    #     raise HTTPException(status_code=500, detail='GROQ_API_KEY not configured in .env')
+    # return ChatGroq(
+    #     model='llama-3.3-70b-versatile',
+    #     api_key=os.getenv('GROQ_API_KEY'),
+    #     temperature=0.3
+    # )
 
 app = FastAPI()
 
@@ -40,6 +70,21 @@ vector_store = None
 @app.post('/upload')
 async def upload_pdf(file: UploadFile = File(...)):
     global vector_store
+
+    # Clear existing database to avoid mixing data from previous uploads
+    if vector_store is not None:
+        try:
+            vector_store.delete_collection()
+        except Exception as e:
+            logging.warning(f"Could not delete collection: {e}")
+        vector_store = None
+
+    import shutil
+    if os.path.exists('./chroma_db'):
+        try:
+            shutil.rmtree('./chroma_db')
+        except Exception as e:
+            logging.warning(f"Could not remove chroma_db directory: {e}")
 
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail='Only PDF files allowed')
@@ -94,15 +139,8 @@ async def ask_question(body: QuestionRequest):
     if vector_store is None:
         raise HTTPException(status_code=400, detail='Please upload a PDF first')
 
-    if not os.getenv('GROQ_API_KEY'):
-        raise HTTPException(status_code=500, detail='GROQ_API_KEY not configured')
-
     try:
-        llm = ChatGroq(
-            model='llama-3.3-70b-versatile',
-            api_key=os.getenv('GROQ_API_KEY'),
-            temperature=0.3
-        )
+        llm = get_llm()
 
         retriever = vector_store.as_retriever(search_kwargs={'k': 4})
         docs = retriever.invoke(body.question)
@@ -138,11 +176,7 @@ async def summarize_pdf():
     if vector_store is None:
         raise HTTPException(status_code=400, detail='Please upload a PDF first')
 
-    llm = ChatGroq(
-        model='llama-3.3-70b-versatile',
-        api_key=os.getenv('GROQ_API_KEY'),
-        temperature=0.3
-    )
+    llm = get_llm()
 
     # Get all chunks from the vector store
     all_docs = vector_store.get()
