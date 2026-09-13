@@ -6,56 +6,49 @@ import os
 import tempfile
 from dotenv import load_dotenv
 import logging
+import shutil
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_groq import ChatGroq
-# pyrefly: ignore [missing-import]
-# from langchain_ core.prompts import PromptTemplate
-# pyrefly: ignore [missing-import]
 from langchain_anthropic import ChatAnthropic
+
 load_dotenv()
 
+# ── Singleton Embedding Model ────────────────────────────────────
+# Load once at startup — avoids ~2-3s model reload on every upload
+logger.info("Loading embedding model (all-MiniLM-L6-v2)...")
+_embeddings = HuggingFaceEmbeddings(model_name='all-MiniLM-L6-v2')
+logger.info("Embedding model loaded.")
+
+
 def get_llm():
-    """
-    Helper function to initialize the LLM.
-    To switch between Claude and Groq:
-    - Simply comment/uncomment the respective blocks below.
-    - Make sure the appropriate API key is configured in your .env file.
-    """
-    # === OPTION 1: Claude (Anthropic) ===
-    # To use Claude, uncomment the lines below, and comment out the Groq block.
-    
-    api_key =  os.getenv("CLAUDE_API_KEY")
+    """Initialize the LLM with proper error handling."""
+    api_key = os.getenv("CLAUDE_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=500, detail="Claude API key (ANTHROPIC_API_KEY or CLAUDE_API_KEY) not configured in .env")
+        raise HTTPException(
+            status_code=500,
+            detail="CLAUDE_API_KEY not configured in .env"
+        )
     return ChatAnthropic(
         model="claude-haiku-4-5-20251001",
         api_key=api_key,
         temperature=0.3
     )
 
-    # === OPTION 2: Groq ===
-    # if not os.getenv('GROQ_API_KEY'):
-    #     raise HTTPException(status_code=500, detail='GROQ_API_KEY not configured in .env')
-    # return ChatGroq(
-    #     model='llama-3.3-70b-versatile',
-    #     api_key=os.getenv('GROQ_API_KEY'),
-    #     temperature=0.3
-    # )
 
-app = FastAPI()
+# ── App Setup ────────────────────────────────────────────────────
+app = FastAPI(title="DocBot API", version="2.0.0")
 
-# CORS configuration - must be added first
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        'http://localhost:5173',           # Local frontend
-        'https://qabot-frontend.onrender.com',  # Render frontend (update with your URL)
+        'http://localhost:5173',
+        'http://localhost:5174',
+        'https://qabot-frontend.onrender.com',
         'https://your-frontend.vercel.app'
     ],
     allow_credentials=True,
@@ -64,74 +57,107 @@ app.add_middleware(
     expose_headers=['*'],
 )
 
+# ── Global State ─────────────────────────────────────────────────
 vector_store = None
-
-
-@app.post('/upload')
-async def upload_pdf(file: UploadFile = File(...)):
-    global vector_store
-
-    # Clear existing database to avoid mixing data from previous uploads
-    if vector_store is not None:
-        try:
-            vector_store.delete_collection()
-        except Exception as e:
-            logging.warning(f"Could not delete collection: {e}")
-        vector_store = None
-
-    import shutil
-    if os.path.exists('./chroma_db'):
-        try:
-            shutil.rmtree('./chroma_db')
-        except Exception as e:
-            logging.warning(f"Could not remove chroma_db directory: {e}")
-
-    if not file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail='Only PDF files allowed')
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
-        content = await file.read()
-        tmp.write(content)
-        tmp_path = tmp.name
-
-    text = ''
-    with pdfplumber.open(tmp_path) as pdf:
-        for page in pdf.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + '\n'
-
-    os.unlink(tmp_path)
-
-    if not text.strip():
-        raise HTTPException(status_code=400, detail='Could not extract text from PDF')
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
-    )
-    chunks = splitter.split_text(text)
-
-    embeddings = HuggingFaceEmbeddings(
-        model_name='all-MiniLM-L6-v2'
-    )
-    vector_store = Chroma.from_texts(
-        texts=chunks,
-        embedding=embeddings,
-        persist_directory='./chroma_db'
-    )
-
-    return {
-        'message': 'PDF processed successfully',
-        'chunks': len(chunks),
-        'characters': len(text)
-    }
+doc_metadata = None  # Track document info for the stats endpoint
 
 
 class QuestionRequest(BaseModel):
     question: str
 
 
+# ── Upload Endpoint ──────────────────────────────────────────────
+@app.post('/upload')
+async def upload_pdf(file: UploadFile = File(...)):
+    global vector_store, doc_metadata
+
+    # Validate file type
+    if not file.filename.endswith('.pdf'):
+        raise HTTPException(status_code=400, detail='Only PDF files are allowed')
+
+    # Clear previous data
+    if vector_store is not None:
+        try:
+            vector_store.delete_collection()
+        except Exception as e:
+            logger.warning(f"Could not delete collection: {e}")
+        vector_store = None
+
+    if os.path.exists('./chroma_db'):
+        try:
+            shutil.rmtree('./chroma_db')
+        except Exception as e:
+            logger.warning(f"Could not remove chroma_db: {e}")
+
+    # Save uploaded file temporarily
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        # Extract text with page-level tracking for metadata
+        pages_text = []
+        with pdfplumber.open(tmp_path) as pdf:
+            for page_num, page in enumerate(pdf.pages, start=1):
+                extracted = page.extract_text()
+                if extracted:
+                    pages_text.append((page_num, extracted))
+    finally:
+        os.unlink(tmp_path)
+
+    if not pages_text:
+        raise HTTPException(status_code=400, detail='Could not extract text from PDF')
+
+    full_text = '\n'.join([text for _, text in pages_text])
+
+    # Split with page-aware metadata
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,       # Slightly smaller chunks for better retrieval precision
+        chunk_overlap=150,    # Overlap for context continuity
+        separators=["\n\n", "\n", ". ", " ", ""]
+    )
+
+    chunks = []
+    metadatas = []
+    chunk_idx = 0
+    for page_num, page_text in pages_text:
+        page_chunks = splitter.split_text(page_text)
+        for chunk_text in page_chunks:
+            chunks.append(chunk_text)
+            metadatas.append({
+                'page': page_num,
+                'chunk_index': chunk_idx,
+                'source': file.filename
+            })
+            chunk_idx += 1
+
+    # Build vector store with metadata (reuse singleton embeddings)
+    vector_store = Chroma.from_texts(
+        texts=chunks,
+        embedding=_embeddings,
+        metadatas=metadatas,
+        persist_directory='./chroma_db'
+    )
+
+    doc_metadata = {
+        'filename': file.filename,
+        'pages': len(pages_text),
+        'chunks': len(chunks),
+        'characters': len(full_text)
+    }
+
+    logger.info(f"Indexed '{file.filename}': {len(pages_text)} pages, {len(chunks)} chunks")
+
+    return {
+        'message': 'PDF processed successfully',
+        'chunks': len(chunks),
+        'characters': len(full_text),
+        'pages': len(pages_text)
+    }
+
+
+# ── Ask Endpoint ─────────────────────────────────────────────────
 @app.post('/ask')
 async def ask_question(body: QuestionRequest):
     global vector_store
@@ -142,33 +168,56 @@ async def ask_question(body: QuestionRequest):
     try:
         llm = get_llm()
 
-        retriever = vector_store.as_retriever(search_kwargs={'k': 4})
+        # MMR retrieval for diverse, non-redundant results
+        retriever = vector_store.as_retriever(
+            search_type="mmr",
+            search_kwargs={
+                'k': 4,              # Return 4 docs
+                'fetch_k': 10,       # Consider top 10 before MMR filtering
+                'lambda_mult': 0.7   # Balance relevance vs diversity
+            }
+        )
         docs = retriever.invoke(body.question)
-
         context = '\n\n'.join([doc.page_content for doc in docs])
 
-        prompt = f"""Use the following context to answer the question. 
-If the answer is not in the context, say "I couldn't find that in the document."
+        # Structured system/user prompt for better answer quality
+        prompt = f"""You are a precise document analysis assistant. Answer the user's question based ONLY on the provided context from their uploaded document.
 
-Context:
+Rules:
+- Answer directly and concisely based on the context
+- Use markdown formatting (headings, bullet points, bold) for readability
+- If the answer is not in the context, say "I couldn't find that information in the document."
+- Do not make up information beyond what's in the context
+- Quote relevant passages when appropriate
+
+Context from document:
+---
 {context}
+---
 
-Question: {body.question}
-
-Answer:"""
+User's question: {body.question}"""
 
         response = llm.invoke(prompt)
 
-        sources = [doc.page_content[:200] + '...' for doc in docs]
+        # Format sources with page numbers from metadata
+        sources = []
+        for doc in docs:
+            page = doc.metadata.get('page', '?')
+            preview = doc.page_content[:180].strip()
+            sources.append(f"Page {page}: {preview}...")
 
         return {
             'answer': response.content,
             'sources': sources
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logging.error(f"Error in /ask endpoint: {str(e)}", exc_info=True)
+        logger.error(f"Error in /ask: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ── Summarize Endpoint ───────────────────────────────────────────
 @app.post('/summarize')
 async def summarize_pdf():
     global vector_store
@@ -176,32 +225,116 @@ async def summarize_pdf():
     if vector_store is None:
         raise HTTPException(status_code=400, detail='Please upload a PDF first')
 
-    llm = get_llm()
+    try:
+        llm = get_llm()
 
-    # Get all chunks from the vector store
-    all_docs = vector_store.get()
-    all_text = '\n\n'.join(all_docs['documents'])
+        # Get all chunks
+        all_docs = vector_store.get()
+        all_chunks = all_docs['documents']
 
-    # Limit to first 6000 characters to avoid token limits
-    truncated_text = all_text[:6000]
+        # Iterative summarization for long documents
+        # Instead of truncating at 6000 chars, summarize in batches then combine
+        MAX_BATCH_CHARS = 5000
 
-    prompt = f"""You are a document summarizer. Read the following document content and provide:
-1. A brief overview (2-3 sentences)
-2. Key topics covered (bullet points)
-3. Important details or conclusions
+        if len('\n\n'.join(all_chunks)) <= MAX_BATCH_CHARS:
+            # Short document — single pass
+            combined = '\n\n'.join(all_chunks)
+            summary = await _generate_summary(llm, combined, is_final=True)
+        else:
+            # Long document — map-reduce style
+            batch_summaries = []
+            current_batch = []
+            current_chars = 0
+
+            for chunk in all_chunks:
+                if current_chars + len(chunk) > MAX_BATCH_CHARS and current_batch:
+                    batch_text = '\n\n'.join(current_batch)
+                    batch_summary = await _generate_summary(llm, batch_text, is_final=False)
+                    batch_summaries.append(batch_summary)
+                    current_batch = []
+                    current_chars = 0
+                current_batch.append(chunk)
+                current_chars += len(chunk)
+
+            # Process remaining batch
+            if current_batch:
+                batch_text = '\n\n'.join(current_batch)
+                batch_summary = await _generate_summary(llm, batch_text, is_final=False)
+                batch_summaries.append(batch_summary)
+
+            # Combine batch summaries into final summary
+            combined_summaries = '\n\n'.join(batch_summaries)
+            summary = await _generate_final_summary(llm, combined_summaries)
+
+        return {'summary': summary}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in /summarize: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _generate_summary(llm, text: str, is_final: bool) -> str:
+    """Generate a summary for a chunk of text."""
+    if is_final:
+        prompt = f"""You are a document summarizer. Read the following document content and provide a comprehensive summary in markdown format:
+
+1. **Overview** — 2-3 sentence summary of the document
+2. **Key Topics** — bullet points of main topics covered
+3. **Important Details** — key findings, conclusions, or notable information
 
 Document content:
-{truncated_text}
+---
+{text}
+---
 
 Summary:"""
+    else:
+        prompt = f"""Summarize the following section of a document concisely, preserving all key information, facts, and conclusions:
+
+{text}
+
+Concise summary:"""
 
     response = llm.invoke(prompt)
+    return response.content
 
-    return {
-        'summary': response.content
-    }
 
+async def _generate_final_summary(llm, combined_summaries: str) -> str:
+    """Combine multiple batch summaries into one cohesive final summary."""
+    prompt = f"""You are a document summarizer. Below are summaries of different sections of the same document. Combine them into one cohesive, comprehensive summary in markdown format:
+
+1. **Overview** — 2-3 sentence summary of the entire document
+2. **Key Topics** — bullet points of main topics covered
+3. **Important Details** — key findings, conclusions, or notable information
+
+Section summaries:
+---
+{combined_summaries}
+---
+
+Combined summary:"""
+
+    response = llm.invoke(prompt)
+    return response.content
+
+
+# ── Stats Endpoint ───────────────────────────────────────────────
+@app.get('/stats')
+def get_stats():
+    """Return metadata about the currently loaded document."""
+    if doc_metadata is None:
+        raise HTTPException(status_code=400, detail='No document loaded')
+    return doc_metadata
+
+
+# ── Health Check ─────────────────────────────────────────────────
 @app.get('/')
 def root():
-    return {'status': 'running', 'pdf_loaded': vector_store is not None}
-
+    return {
+        'status': 'running',
+        'version': '2.0.0',
+        'pdf_loaded': vector_store is not None,
+        'document': doc_metadata
+    }
