@@ -3,7 +3,7 @@
 ## Prerequisites
 - GitHub account with your repo pushed
 - Render account (render.com)
-- GEMINI_API_KEY and GROQ_API_KEY
+- An Anthropic API key for Claude (`ANTHROPIC_API_KEY`)
 
 ## Deployment Steps
 
@@ -23,14 +23,15 @@ git push origin main
    - **Name**: `qabot-backend`
    - **Environment**: `Python 3.11`
    - **Build Command**: `pip install -r qabot/backend/requirements.txt`
-   - **Start Command**: `cd qabot/backend && gunicorn -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT main:app`
-   - **Plan**: Free (or Pro for persistence)
+   - **Start Command**: `cd qabot/backend && gunicorn -w 1 --timeout 180 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT main:app`
+   - **Plan**: Starter or higher (at least 1 GB RAM). The embedding model plus the OCR engine use about 600 MB, which exceeds the 512 MB free tier.
+
+> Keep a single worker (`-w 1`): the loaded document is held in process memory, so extra workers would not see it.
 
 ### Step 3: Add Environment Variables
 
 In Render dashboard for backend service:
-- Add `GEMINI_API_KEY` = your actual API key
-- Add `GROQ_API_KEY` = your actual API key
+- Add `ANTHROPIC_API_KEY` = your Claude API key
 - Add `PYTHON_VERSION` = `3.11`
 
 ### Step 4: Create Frontend Service on Render
@@ -47,23 +48,11 @@ In Render dashboard for backend service:
 In Render dashboard for frontend service:
 - Add `VITE_API_URL` = `https://qabot-backend.onrender.com` (replace with your actual backend URL)
 
-### Step 6: Update CORS in Backend
+### Step 6: Allow Your Frontend Origin (CORS)
 
-Update [qabot/backend/main.py](qabot/backend/main.py) to allow your Render frontend:
+`http://localhost:5173` and `https://qabot-frontend.onrender.com` are allowed by default. For any other frontend URL, set this on the backend service (comma-separated, no code change needed):
 
-```python
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        'http://localhost:5173',  # Local development
-        'https://qabot-frontend.onrender.com'  # Your Render frontend URL
-    ],
-    allow_credentials=True,
-    allow_methods=['*'],
-    allow_headers=['*'],
-    expose_headers=['*'],
-)
-```
+- `ALLOWED_ORIGINS` = `https://your-frontend.example.com`
 
 ### Step 7: Deploy
 
@@ -83,17 +72,11 @@ app.add_middleware(
 ### Update Frontend URL
 Replace `https://qabot-backend.onrender.com` with your actual Render backend URL after creation.
 
-### Install Gunicorn
-Add to `backend/requirements.txt`:
-```
-gunicorn
-```
-
 ## Testing
 
 After deployment:
 1. Visit `https://qabot-frontend.onrender.com`
-2. Upload a PDF
+2. Upload a PDF, Word document or image (try a scanned page to check OCR)
 3. Ask questions to verify the backend connection
 
 ## Troubleshooting
@@ -107,11 +90,13 @@ After deployment:
 
 ```bash
 # Backend
-cd backend
+cd qabot/backend
+python -m pytest          # run the test suite
 python -m uvicorn main:app --reload
 
 # Frontend (new terminal)
-cd frontend/frontend
+cd qabot/frontend/frontend
+npm test                  # run the test suite
 npm run dev
 ```
 

@@ -4,10 +4,14 @@ gunicorn
 python-multipart
 pdfplumber
 langchain
-langchain-google-genai
-langchain-groq
 langchain-community
+langchain-text-splitters
 chromadb
 sentence-transformers
 python-dotenv
-langchain-anthropic
+anthropic>=1.5.0
+# OCR + extra formats (pure pip; RapidOCR bundles its ONNX models)
+rapidocr>=3.9
+onnxruntime
+python-docx
+pillow
